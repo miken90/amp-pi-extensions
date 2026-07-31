@@ -1,0 +1,18 @@
+{
+  "name": "amp-pi",
+  "version": "0.1.0",
+  "description": "A general, extensible pack of enhancements for the Pi agent harness. First feature: automatic skill routing (auto-skills).",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "pi"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "echo 'tsc not available offline; use bun test + bun build' && exit 0"
+  }
+}
