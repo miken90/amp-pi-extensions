@@ -8,11 +8,15 @@
   "pi": {
     "extensions": ["./extensions"]
   },
+  "bin": {
+    "amp-pi-repair-herdr": "./scripts/repair-herdr-agent.ts"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "scripts": {
     "test": "bun test",
+    "repair-herdr": "bun run ./scripts/repair-herdr-agent.ts",
     "typecheck": "echo 'tsc not available offline; use bun test + bun build' && exit 0"
   }
 }

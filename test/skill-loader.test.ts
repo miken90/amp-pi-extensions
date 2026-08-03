@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import skillLoader, {
-  collectClaudeSkillDirs,
   findSkill,
   parseSkillEntries,
   transformSkillCommand,
@@ -22,16 +21,14 @@ const entries: SkillEntry[] = [
   { name: "ak-debug", description: "Debug systematically", filePath: "/skills/ak-debug/SKILL.md" },
 ];
 
-function registeredTool(): ToolDefinition {
-  let tool: ToolDefinition | undefined;
-  skillLoader({
-    on(): void {},
-    registerTool(def: ToolDefinition): void {
-      tool = def;
-    },
-  } as unknown as ExtensionAPI);
-  if (!tool) throw new Error("skill tool was not registered");
-  return tool;
+function makeAPI(): { handlers: Map<string, (...args: any[]) => any>; tools: ToolDefinition[]; on(event: string, h: (...args: any[]) => any): void; registerTool(def: ToolDefinition): void } {
+  const handlers = new Map<string, (...args: any[]) => any>();
+  return {
+    handlers,
+    tools: [],
+    on(event, h) { handlers.set(event, h); },
+    registerTool(def) { this.tools.push(def); },
+  };
 }
 
 function context(systemPrompt: string, sessionManager: object): ExtensionContext {
@@ -60,19 +57,12 @@ describe("skill-loader discovery", () => {
     expect(findSkill("agent beowser", entries)?.name).toBe("agent-browser");
   });
 
-  test("discovers ancestor and global Claude skill directories", () => {
-    const root = mkdtempSync(join(tmpdir(), "amp-claude-skills-"));
-    tempDirs.push(root);
-    const home = join(root, "home");
-    const repo = join(root, "repo");
-    const nested = join(repo, "packages", "app");
-    const globalSkills = join(home, ".claude", "skills");
-    const repoSkills = join(repo, ".claude", "skills");
-    const nestedSkills = join(nested, ".claude", "skills");
-    for (const dir of [globalSkills, repoSkills, nestedSkills, join(repo, ".git")]) mkdirSync(dir, { recursive: true });
-
-    expect(collectClaudeSkillDirs(nested, home, true)).toEqual([nestedSkills, repoSkills, globalSkills]);
-    expect(collectClaudeSkillDirs(nested, home, false)).toEqual([globalSkills]);
+  test("does NOT surface ~/.claude/skills or any resources_discover handler", () => {
+    const api = makeAPI();
+    skillLoader(api as unknown as ExtensionAPI);
+    // No resources_discover handler is registered — Pi's built-in paths
+    // (~/.pi/agent/skills and ~/.agents/skills) handle discovery instead.
+    expect(api.handlers.has("resources_discover")).toBe(false);
   });
 
   test("bypasses Pi's native slash-command expansion", () => {
@@ -83,14 +73,18 @@ describe("skill-loader discovery", () => {
 
 describe("skill tool", () => {
   test("registers mandatory invocation guidance", () => {
-    const tool = registeredTool();
+    const api = makeAPI();
+    skillLoader(api as unknown as ExtensionAPI);
+    const tool = api.tools[0]!;
     expect(tool.name).toBe("skill");
     expect(tool.executionMode).toBe("parallel");
     expect(tool.promptGuidelines).toContain("When a task matches an entry in <available_skills>, call the skill tool before acting.");
   });
 
   test("loads a skill once per session", async () => {
-    const tool = registeredTool();
+    const api = makeAPI();
+    skillLoader(api as unknown as ExtensionAPI);
+    const tool = api.tools[0]!;
     const filePath = makeSkill();
     const prompt = skillPrompt(filePath);
     const session = {};

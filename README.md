@@ -2,7 +2,8 @@
 
 A general, extensible pack of enhancements for the [Pi agent harness](https://pi.dev/).
 The package name is intentionally generic so it can host unrelated Pi enhancements
-over time. It includes **auto-skills** and a durable **skill-loader** tool.
+over time. It includes **auto-skills**, a durable **skill-loader** tool, and a
+**herdr-repair** post-update workflow.
 
 > auto-skills is a **convenience layer that supplements — never replaces — the
 > model's own skill selection**. Pi already lists every skill's name+description
@@ -15,10 +16,34 @@ over time. It includes **auto-skills** and a durable **skill-loader** tool.
 ### skill-loader
 
 Provides the `skill` tool used to invoke installed skills by name, inject their
-instructions once per session, discover Claude-compatible skill directories,
-and route `/skill:name` through the tool instead of Pi's native inline
-expansion. Keeping this tool in this repository prevents package updates from
-overwriting local skill-loading fixes.
+instructions once per session, and route `/skill:name` through the tool instead
+of Pi's native inline expansion. Skill discovery is left to Pi's built-in
+locations (`~/.pi/agent/skills/` and `~/.agents/skills/`); the extension no
+longer surfaces `~/.claude/skills/`, whose colon-named entries triggered Pi
+`invalid-name` diagnostics. Keeping this tool in this repository prevents
+package updates from overwriting local skill-loading fixes.
+
+### herdr-repair
+
+A safe, idempotent post-update repair for the globally installed hd-agent
+`amp-pi`/`pi` launcher. Herdr (v0.7.5+) recognizes a foreground process as a
+promptable agent when the process-group leader exports `HERDR_AGENT`. The
+hd-agent wrapper spawns the real Pi CLI via `Bun.spawn` and forwards
+`...process.env` plus `AMP_PI_CLI`, but not `HERDR_AGENT`, so wrapper-launched
+Pi sessions are invisible to Herdr unless the user manually prefixes
+`HERDR_AGENT=pi`. This workflow injects `HERDR_AGENT: "pi"` into the wrapper's
+env object so every fresh `amp-pi`/`pi` session is Herdr-promptable.
+
+Safety properties (all covered by `test/repair-herdr-agent.test.ts`):
+
+- **Idempotent** — a second run detects the fix is already present and no-ops.
+- **Shape-locked** — only patches the exact hd-agent 0.9.x env line
+  `{ ...process.env, AMP_PI_CLI: piCli }`; refuses anything else with a non-zero
+  exit and the offending line printed.
+- **Upstream-aware** — no-ops once hd-agent ships equivalent `HERDR_AGENT`
+  recognition upstream.
+- **Reversible** — writes a `pim.ts.herdr-backup` of the original content before
+  the first patch; `--restore` rolls it back.
 
 ### auto-skills
 
@@ -178,23 +203,51 @@ Enable/disable also persists via `/askills enable|disable` (stored in
 | `/askills enable` · `/askills disable` | Toggle auto-routing (persisted). |
 | `/askills test <query or full contract>` | Dry-run the router (same parse + authority pipeline as a real turn) and report matches + scores. |
 
+## Herdr launcher repair
+
+After `pi update --extensions` or reinstalling/upgrading `hd-agent`, the global
+`amp-pi`/`pi` wrapper (`~/.bun/install/global/node_modules/hd-agent/bin/pim.ts`)
+is overwritten and loses the `HERDR_AGENT` env injection that makes wrapper-
+launched Pi sessions Herdr-promptable. Re-run the repair from any cwd:
+
+```bash
+# Locate the package (git install or local checkout) and run the repair:
+bun run ~/.pi/agent/git/github.com/miken90/amp-pi-extensions/scripts/repair-herdr-agent.ts
+
+# Or, from a local checkout:
+bun run /absolute/path/to/pi-extensions/scripts/repair-herdr-agent.ts
+
+bun run …/repair-herdr-agent.ts --check     # dry-run: report shape, write nothing
+bun run …/repair-herdr-agent.ts --restore   # roll back from pim.ts.herdr-backup
+bun run …/repair-herdr-agent.ts --launcher /explicit/pim.ts   # override target
+```
+
+The script verifies the file looks like the hd-agent launcher (contains both
+`AMP_PI_CLI` and `Bun.spawn`), only patches the exact known env shape, writes a
+reversible `pim.ts.herdr-backup`, and exits non-zero with the offending line if
+the upstream shape has changed and needs manual review. It is safe to re-run
+after every update; it no-ops when the launcher already exports `HERDR_AGENT`
+(either from a prior repair or a future upstream fix).
+
 ## Develop
 
 ```bash
 bun test                       # unit + integration + load-smoke tests
 bun build extensions/auto-skills/index.ts --no-bundle --outfile /tmp/auto-skills.js
 bun build extensions/skill-loader/index.ts --no-bundle --outfile /tmp/skill-loader.js
+bun build scripts/repair-herdr-agent.ts --no-bundle --outfile /tmp/repair-herdr-agent.js
 ```
 
 Tests inject a fake parser + temp agent dir, so they never touch the real Pi
-config or require network.
+config or require network. The herdr-repair tests use temp launchers and never
+mutate the real global launcher.
 
 ## Layout
 
 ```
 extensions/
 ├── skill-loader/
-│   └── index.ts  # skill tool, /skill routing, Claude skill discovery
+│   └── index.ts  # skill tool, /skill routing
 └── auto-skills/
     ├── index.ts      # Pi extension entry: events, commands, status
     ├── pipeline.ts   # pure end-to-end route: parse -> score -> authority
@@ -206,6 +259,20 @@ extensions/
     ├── prompt.ts     # builds the injected <auto-skills> block
     ├── config.ts     # settings + persisted runtime state
     └── types.ts      # shared types & defaults
+scripts/
+└── repair-herdr-agent.ts  # idempotent post-update Herdr launcher repair
 ```
 
 See [`docs/auto-skills.md`](docs/auto-skills.md) for design notes.
+
+## Troubleshooting: skill `invalid-name` diagnostics
+
+Pi emits `invalid-name` diagnostics when a `SKILL.md` `name:` field contains
+characters outside the allowed set (lowercase letters, numbers, hyphens only).
+A common source was `~/.claude/skills/`, where entries use colon names like
+`ak:web-frameworks`. **This extension no longer surfaces `~/.claude/skills/`**,
+so Pi does not scan it and the diagnostics no longer appear for skills loaded
+through this package. Skill discovery is now limited to Pi's two built-in
+global paths (`~/.pi/agent/skills/` and `~/.agents/skills/`). If you add
+`~/.claude/skills/` back via Pi settings (`"skills": ["~/.claude/skills"]`),
+the diagnostics will return unless the `name:` fields are hyphen-only.

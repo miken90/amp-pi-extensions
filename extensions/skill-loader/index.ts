@@ -1,6 +1,5 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type SkillEntry = {
@@ -104,43 +103,6 @@ function suggestionsFor(query: string, entries: readonly SkillEntry[]): SkillEnt
     .map(({ entry }) => entry);
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function findGitRoot(startDir: string): string | undefined {
-  let dir = resolve(startDir);
-  while (true) {
-    if (existsSync(join(dir, ".git"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-}
-
-export function collectClaudeSkillDirs(cwd: string, home: string, projectTrusted: boolean): string[] {
-  const globalDir = resolve(home, ".claude", "skills");
-  const result: string[] = [];
-
-  if (projectTrusted) {
-    const root = findGitRoot(cwd);
-    let dir = resolve(cwd);
-    while (true) {
-      const candidate = resolve(dir, ".claude", "skills");
-      if (candidate !== globalDir && isDirectory(candidate)) result.push(candidate);
-      if ((root && dir === root) || dirname(dir) === dir) break;
-      dir = dirname(dir);
-    }
-  }
-
-  if (isDirectory(globalDir)) result.push(globalDir);
-  return result;
-}
-
 export function transformSkillCommand(text: string): string | undefined {
   return text.startsWith("/skill:") ? ` ${text}` : undefined;
 }
@@ -155,10 +117,6 @@ function loadedSkillsFor(sessionManager: object): Set<string> {
 }
 
 export default function skillLoader(pi: ExtensionAPI): void {
-  pi.on("resources_discover", (event, ctx) => ({
-    skillPaths: collectClaudeSkillDirs(event.cwd, homedir(), ctx.isProjectTrusted()),
-  }));
-
   const clearSessionCache = (_event: unknown, ctx: { sessionManager: object }) => {
     loadedBySession.delete(ctx.sessionManager);
   };
