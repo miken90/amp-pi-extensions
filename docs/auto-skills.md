@@ -3,7 +3,8 @@
 ## Goal
 
 Pi already lists every installed skill's name + description in the system prompt
-(progressive disclosure) and lets the model `read` a full `SKILL.md` on demand.
+(progressive disclosure). The sibling skill-loader lets the model invoke a
+skill by name and receive its full `SKILL.md` body on demand.
 With a large catalog this is noisy and the model may not pick the best skill.
 **auto-skills** adds curation: each turn it selects the materially relevant
 skills for the specific request and proactively loads their full bodies, while
@@ -131,15 +132,17 @@ for the whole catalog.
   authorized-deploy/authorized-harness-docs-sync), and an extension-load smoke
   test against a mock `ExtensionAPI` with injected deps.
 - `bun build … --no-bundle` — syntax check across all sources.
-- Real Pi load smoke test (`pi -e ./extensions/auto-skills -p …` with a temp
-  `HOME`) confirms the factory loads under jiti and that `before_agent_start`
-  runs, routes, and writes state. Add/modify/remove of `SKILL.md` files between
+- Real Pi load smoke tests confirm both extension factories load under jiti,
+  the model invokes the local `skill` tool, and `before_agent_start` routes and
+  writes auto-skills state. Add/modify/remove of `SKILL.md` files between
   invocations is reflected in the routed selection.
 
 ## Extension points (future)
 
 The `amp-pi` package manifest points at `./extensions`; additional unrelated
 extensions can be added as sibling subdirectories and are auto-discovered by Pi.
+The sibling `skill-loader` extension owns explicit skill invocation through the
+`skill` tool; `auto-skills` remains the relevance-based automatic selector.
 `auto-skills` itself exposes injectable deps (`parseDir`, `readSettings`,
 `agentDir`) so its logic stays testable without the Pi runtime. The pure
 routing pipeline lives in `pipeline.ts` (`routePrompt`) and is shared by the

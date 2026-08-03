@@ -2,15 +2,23 @@
 
 A general, extensible pack of enhancements for the [Pi agent harness](https://pi.dev/).
 The package name is intentionally generic so it can host unrelated Pi enhancements
-over time. The first feature is **auto-skills**.
+over time. It includes **auto-skills** and a durable **skill-loader** tool.
 
 > auto-skills is a **convenience layer that supplements — never replaces — the
 > model's own skill selection**. Pi already lists every skill's name+description
 > in the system prompt (progressive disclosure); auto-skills just curates the
 > few materially relevant ones per turn and pre-loads their bodies. The model
-> can still `read` any other skill on its own.
+> can still invoke any other skill through the `skill` tool.
 
 ## Features
+
+### skill-loader
+
+Provides the `skill` tool used to invoke installed skills by name, inject their
+instructions once per session, discover Claude-compatible skill directories,
+and route `/skill:name` through the tool instead of Pi's native inline
+expansion. Keeping this tool in this repository prevents package updates from
+overwriting local skill-loading fixes.
 
 ### auto-skills
 
@@ -36,7 +44,7 @@ user's request, instead of always relying on the model to sift the full catalog.
 - **Live metadata refresh**: mtime-aware scan every turn — added, modified, or
   removed `SKILL.md` files are picked up without a restart.
 - **Explicit invocation wins**: `/skill:name` and `/ak:name` always bypass
-  auto-routing; Pi's native skill expansion owns the turn.
+  auto-routing; the explicit skill invocation owns the turn.
 - **Stable per-turn snapshot**: the catalog is refreshed once before each turn
   and held constant for that turn.
 - **Observability & controls**: footer status, persisted state, and
@@ -44,9 +52,42 @@ user's request, instead of always relying on the model to sift the full catalog.
 
 ## Install
 
-This project is a Pi package (see `package.json` → `pi.extensions`). The `pi-package`
-keyword makes it discoverable; the `pi.extensions: ["./extensions"]` manifest points
-Pi at the extension subdirectories (the `auto-skills/index.ts` entry is auto-discovered).
+This project is a Pi package (see `package.json` → `pi.extensions`). The
+`pi-package` keyword makes it discoverable; the `pi.extensions:
+["./extensions"]` manifest auto-discovers both extension entry points.
+
+### Recommended: install from Git
+
+```bash
+pi install git:github.com/miken90/amp-pi-extensions
+```
+
+Then update it at any time with:
+
+```bash
+pi update --extensions
+```
+
+If `hd-agent` is also installed, disable its bundled skill-loader to avoid two
+extensions registering the same `skill` tool. Use the object form in
+`~/.pi/agent/settings.json`:
+
+```json
+{
+  "packages": [
+    "git:github.com/miken90/amp-pi-extensions",
+    {
+      "source": "git:github.com/tuong-nguyen-vn/hd-agent",
+      "extensions": ["-./src/extensions/skill-loader/index.ts"]
+    }
+  ]
+}
+```
+
+The exclusion survives `pi update --extensions`: HD Agent continues updating,
+but this package remains the owner of the `skill` tool.
+
+### Development: install from a local checkout
 
 Install the package by absolute local path (no copy; Pi records the path in settings):
 
@@ -58,28 +99,34 @@ pi install /absolute/path/to/pi-extensions
 pi install -l /absolute/path/to/pi-extensions
 ```
 
-Load temporarily without installing (current process only):
+Load temporarily without installing (current process only). Do not load the
+whole package alongside an enabled HD Agent skill-loader unless that extension
+is excluded as shown above:
 
 ```bash
 pi -e ./extensions/auto-skills          # a single extension dir
 pi -e /absolute/path/to/pi-extensions   # the whole package
 ```
 
-Verify it is installed/listed:
+### Verify
 
 ```bash
-pi list                 # shows packages recorded in settings
+pi list
+pi --mode json -p 'Use the ak-debug skill, then reply with exactly LOADED' --no-session
 ```
 
-Confirm it is loaded at runtime: start `pi` and check the footer for an
-`auto-skills: …` status line, or run `/askills status` inside a session.
+The JSON event stream should contain a `skill` tool call with
+`{"name":"ak-debug"}` followed by a successful tool result. For auto-routing,
+start `pi` and check the footer for an `auto-skills: …` status line, or run
+`/askills status` inside a session.
 
 Update / uninstall:
 
 ```bash
-pi update --extensions                  # reconcile/refresh installed packages
+pi update --extensions                  # update Git packages; local paths are unchanged
 pi remove /absolute/path/to/pi-extensions   # remove from settings (global)
 pi remove -l /absolute/path/to/pi-extensions   # remove (project-local)
+pi remove git:github.com/miken90/amp-pi-extensions
 ```
 
 Restart/reload requirements: Pi loads packages at session start. After
@@ -135,7 +182,8 @@ Enable/disable also persists via `/askills enable|disable` (stored in
 
 ```bash
 bun test                       # unit + integration + load-smoke tests
-bun build extensions/auto-skills/index.ts --no-bundle   # syntax check
+bun build extensions/auto-skills/index.ts --no-bundle --outfile /tmp/auto-skills.js
+bun build extensions/skill-loader/index.ts --no-bundle --outfile /tmp/skill-loader.js
 ```
 
 Tests inject a fake parser + temp agent dir, so they never touch the real Pi
@@ -144,17 +192,20 @@ config or require network.
 ## Layout
 
 ```
-extensions/auto-skills/
-├── index.ts      # Pi extension entry: events, commands, status
-├── pipeline.ts   # pure end-to-end route: parse -> score -> authority
-├── contract.ts   # parse mik-target-v1 prompts; isolate objective/context
-├── authority.ts  # high-impact capability gating (deploy/git/harness/external)
-├── discovery.ts  # mtime-aware SkillIndex (add/modify/remove)
-├── scanner.ts    # self-contained SKILL.md + frontmatter discovery
-├── router.ts     # token scoring + selection (pure)
-├── prompt.ts     # builds the injected <auto-skills> block (preload)
-├── config.ts     # settings + persisted runtime state
-└── types.ts      # shared types & defaults
+extensions/
+├── skill-loader/
+│   └── index.ts  # skill tool, /skill routing, Claude skill discovery
+└── auto-skills/
+    ├── index.ts      # Pi extension entry: events, commands, status
+    ├── pipeline.ts   # pure end-to-end route: parse -> score -> authority
+    ├── contract.ts   # parse mik-target-v1 prompts; isolate objective/context
+    ├── authority.ts  # high-impact capability gating
+    ├── discovery.ts  # mtime-aware SkillIndex (add/modify/remove)
+    ├── scanner.ts    # self-contained SKILL.md discovery
+    ├── router.ts     # token scoring + selection
+    ├── prompt.ts     # builds the injected <auto-skills> block
+    ├── config.ts     # settings + persisted runtime state
+    └── types.ts      # shared types & defaults
 ```
 
 See [`docs/auto-skills.md`](docs/auto-skills.md) for design notes.

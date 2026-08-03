@@ -52,7 +52,7 @@ export default function autoSkills(pi: ExtensionAPI, deps?: AutoSkillsDeps): voi
   // can bypass auto-routing. Set per turn; consumed in before_agent_start.
   pi.on("input", async (event) => {
     if (event.source === "extension") return { action: "continue" };
-    turnExplicit = isExplicitSkillInvocation(event.text);
+    turnExplicit = isExplicitSkillInvocation(event.text.trimStart());
     return { action: "continue" };
   });
 
@@ -63,8 +63,8 @@ export default function autoSkills(pi: ExtensionAPI, deps?: AutoSkillsDeps): voi
       return;
     }
     if (turnExplicit) {
-      // Explicit /skill: or /ak: invocation wins; Pi's native expansion owns
-      // the turn. Record the reason for observability and skip auto-routing.
+      // Explicit /skill: or /ak: invocation wins. Record the reason for
+      // observability and skip auto-routing.
       turnExplicit = false;
       state = { ...state, lastSelected: [], lastReason: "explicit" };
       ctx.ui.setStatus("auto-skills", formatStatus([], true, index.size()));

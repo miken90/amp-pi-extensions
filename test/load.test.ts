@@ -91,6 +91,19 @@ test("explicit /skill: invocation bypasses routing (wins)", async () => {
   expect(res).toBeUndefined();
 });
 
+test("skill-loader transformed /skill: invocation still bypasses routing", async () => {
+  const api = makeAPI();
+  autoSkills(api as any, deps);
+  await fire(api, "session_start", { reason: "startup" });
+  await fire(api, "input", { text: " /skill:deploy something", source: "interactive" });
+  const res = await fire(api, "before_agent_start", {
+    prompt: " /skill:deploy something",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  expect(res).toBeUndefined();
+});
+
 test("ordinary no-match request injects nothing and updates status", async () => {
   const api = makeAPI();
   autoSkills(api as any, deps);
