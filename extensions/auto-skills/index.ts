@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SkillIndex, defaultSkillDirs, type SkillParser } from "./discovery.ts";
 import { scanSkillDir } from "./scanner.ts";
-import { isExplicitSkillInvocation } from "./router.ts";
+import { isExplicitSkillInvocation, parseExplicitSkillName } from "./router.ts";
 import { routePrompt } from "./pipeline.ts";
 import { readConfig, readState, writeState, type RuntimeState } from "./config.ts";
 import { buildSelectedBlock, formatStatus } from "./prompt.ts";
@@ -35,6 +35,7 @@ export default function autoSkills(pi: ExtensionAPI, deps?: AutoSkillsDeps): voi
   let config: AutoSkillsConfig | undefined;
   let state: RuntimeState = { enabled: true };
   let turnExplicit = false;
+  let turnExplicitText = "";
 
   const agentDir = (): string => deps?.agentDir?.() ?? defaultAgentDir();
 
@@ -52,7 +53,9 @@ export default function autoSkills(pi: ExtensionAPI, deps?: AutoSkillsDeps): voi
   // can bypass auto-routing. Set per turn; consumed in before_agent_start.
   pi.on("input", async (event) => {
     if (event.source === "extension") return { action: "continue" };
-    turnExplicit = isExplicitSkillInvocation(event.text.trimStart());
+    const text = event.text.trimStart();
+    turnExplicit = isExplicitSkillInvocation(text);
+    turnExplicitText = turnExplicit ? text : "";
     return { action: "continue" };
   });
 
@@ -62,12 +65,38 @@ export default function autoSkills(pi: ExtensionAPI, deps?: AutoSkillsDeps): voi
       ctx.ui.setStatus("auto-skills", formatStatus([], false, index.size()));
       return;
     }
-    if (turnExplicit) {
+    // The input handler sets turnExplicit, but skill-loader's transform
+    // re-fires the input event with source: "extension", which the input
+    // handler skips. Fall back to checking the prompt itself.
+    const explicitFromPrompt = !turnExplicit && isExplicitSkillInvocation(event.prompt);
+    if (turnExplicit || explicitFromPrompt) {
       // Explicit /skill: or /ak: invocation wins. Record the reason for
       // observability and skip auto-routing.
+      const explicitText = turnExplicit ? turnExplicitText : event.prompt.trimStart();
       turnExplicit = false;
+      turnExplicitText = "";
       state = { ...state, lastSelected: [], lastReason: "explicit" };
       ctx.ui.setStatus("auto-skills", formatStatus([], true, index.size()));
+
+      // Skills with disable-model-invocation are hidden from <available_skills>
+      // by Pi core, so the model doesn't know they exist and won't call the
+      // skill tool on its own. When the user explicitly invokes one, inject a
+      // minimal hint so the model calls the skill tool with the exact name.
+      const skillName = parseExplicitSkillName(explicitText);
+      if (skillName) {
+        // Refresh metadata so the index has the latest skills.
+        const extra = skillRefsFromOptions(event.systemPromptOptions);
+        refresh(ctx.cwd, extra);
+        const match = index.snapshot().find(
+          (s) => s.name === skillName && s.disableModelInvocation,
+        );
+        if (match) {
+          return {
+            systemPrompt: event.systemPrompt +
+              `\n<explicit-skill-hint>\nThe user explicitly invoked skill "${skillName}" which is not listed in <available_skills> but is installed. Call the skill tool with name "${skillName}" to load it.\n</explicit-skill-hint>`,
+          };
+        }
+      }
       return;
     }
 

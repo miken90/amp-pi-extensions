@@ -9,6 +9,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isExplicitSkillInvocation, parseExplicitSkillName } from "../extensions/auto-skills/router.ts";
 import autoSkills, { type AutoSkillsDeps } from "../extensions/auto-skills/index.ts";
 import type { SkillRef } from "../extensions/auto-skills/types.ts";
 
@@ -39,6 +40,7 @@ function makeAPI(): MockAPI {
 const SKILLS: SkillRef[] = [
   { name: "deploy", description: "Deploy apps to cloud platforms like Vercel and Cloudflare", filePath: "/s/deploy/SKILL.md", baseDir: "/s/deploy", disableModelInvocation: false },
   { name: "pdf", description: "Extract text and tables from PDF files", filePath: "/s/pdf/SKILL.md", baseDir: "/s/pdf", disableModelInvocation: false },
+  { name: "ak-advise", description: "Interview-driven advisory skill", filePath: "/s/ak-advise/SKILL.md", baseDir: "/s/ak-advise", disableModelInvocation: true },
 ];
 
 let tmpAgent: string;
@@ -172,4 +174,78 @@ test("/askills test dry-run reports selected skill and score", async () => {
     ui: { setStatus: () => {}, notify: (_m: string) => notes.push(_m) },
   } as any);
   expect(notes.join(" ")).toContain("deploy");
+});
+
+test("explicit /skill: invocation of a disable-model-invocation skill injects hint", async () => {
+  const api = makeAPI();
+  autoSkills(api as any, deps);
+  await fire(api, "session_start", { reason: "startup" });
+  // Seed the index so ak-advise is known.
+  await fire(api, "input", { text: "seed", source: "interactive" });
+  await fire(api, "before_agent_start", {
+    prompt: "seed",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  // Now explicitly invoke the hidden skill.
+  await fire(api, "input", { text: "/skill:ak-advise", source: "interactive" });
+  const res = await fire(api, "before_agent_start", {
+    prompt: " /skill:ak-advise",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  expect(res).toBeTruthy();
+  expect(res.systemPrompt).toContain("<explicit-skill-hint>");
+  expect(res.systemPrompt).toContain("ak-advise");
+});
+
+test("explicit /skill: invocation of a normal skill does NOT inject hint", async () => {
+  const api = makeAPI();
+  autoSkills(api as any, deps);
+  await fire(api, "session_start", { reason: "startup" });
+  await fire(api, "input", { text: "seed", source: "interactive" });
+  await fire(api, "before_agent_start", {
+    prompt: "seed",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  await fire(api, "input", { text: "/skill:deploy", source: "interactive" });
+  const res = await fire(api, "before_agent_start", {
+    prompt: " /skill:deploy",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  expect(res).toBeUndefined();
+});
+
+test("explicit /skill: of hidden skill injects hint even when input handler skipped (skill-loader transform)", async () => {
+  const api = makeAPI();
+  autoSkills(api as any, deps);
+  await fire(api, "session_start", { reason: "startup" });
+  // Seed the index so ak-advise is known.
+  await fire(api, "input", { text: "seed", source: "interactive" });
+  await fire(api, "before_agent_start", {
+    prompt: "seed",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  // Simulate skill-loader transform: input re-fired with source: "extension",
+  // which auto-skills skips. The prompt in before_agent_start still has the
+  // /skill: prefix, so the fallback detection must catch it.
+  await fire(api, "input", { text: " /skill:ak-advise", source: "extension" });
+  const res = await fire(api, "before_agent_start", {
+    prompt: " /skill:ak-advise",
+    systemPrompt: "BASE",
+    systemPromptOptions: { skills: SKILLS },
+  });
+  expect(res).toBeTruthy();
+  expect(res.systemPrompt).toContain("<explicit-skill-hint>");
+  expect(res.systemPrompt).toContain("ak-advise");
+});
+
+test("parseExplicitSkillName extracts name from /skill: and /ak: invocations", () => {
+  expect(parseExplicitSkillName("/skill:ak-advise")).toBe("ak-advise");
+  expect(parseExplicitSkillName("  /skill:ak-advise some args")).toBe("ak-advise");
+  expect(parseExplicitSkillName("/ak:plan my feature")).toBe("plan");
+  expect(parseExplicitSkillName("please deploy")).toBeUndefined();
 });

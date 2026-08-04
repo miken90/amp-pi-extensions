@@ -66,6 +66,20 @@ export function isExplicitSkillInvocation(text: string): boolean {
 }
 
 /**
+ * Extract the skill name from an explicit invocation string.
+ * `/skill:ak-advise` → `ak-advise`; `/ak:plan my feature` → `plan`.
+ * Returns undefined when the text is not an explicit invocation.
+ */
+export function parseExplicitSkillName(text: string): string | undefined {
+  const t = text.trimStart();
+  const skillMatch = t.match(/^\/skill:([\w-]+)/);
+  if (skillMatch) return skillMatch[1];
+  const akMatch = t.match(/^\/ak:([\w-]+)/);
+  if (akMatch) return akMatch[1];
+  return undefined;
+}
+
+/**
  * Score skills against prompt tokens. Weights favor name matches over
  * description matches and reward multi-token coverage of a skill. Returns
  * skills above `threshold`, sorted by score, capped at `maxSelected`.
