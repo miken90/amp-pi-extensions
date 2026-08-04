@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import skillLoader, {
+  discoverDiskSkills,
   findSkill,
   parseSkillEntries,
   transformSkillCommand,
@@ -31,8 +32,8 @@ function makeAPI(): { handlers: Map<string, (...args: any[]) => any>; tools: Too
   };
 }
 
-function context(systemPrompt: string, sessionManager: object): ExtensionContext {
-  return { getSystemPrompt: () => systemPrompt, sessionManager } as ExtensionContext;
+function context(systemPrompt: string, sessionManager: object, cwd = "/tmp"): ExtensionContext {
+  return { getSystemPrompt: () => systemPrompt, sessionManager, cwd } as ExtensionContext;
 }
 
 function makeSkill(): string {
@@ -71,6 +72,39 @@ describe("skill-loader discovery", () => {
   });
 });
 
+describe("discoverDiskSkills", () => {
+  test("finds root .md skills only in rootMdAndNested roots", () => {
+    const rootMdAndNested = mkdtempSync(join(tmpdir(), "disk-skills-root-"));
+    const nestedOnly = mkdtempSync(join(tmpdir(), "disk-skills-nested-"));
+    tempDirs.push(rootMdAndNested, nestedOnly);
+    writeFileSync(join(rootMdAndNested, "quick.md"), "---\nname: quick\ndescription: A quick skill\n---\nbody\n");
+    writeFileSync(join(nestedOnly, "ignored.md"), "---\nname: ignored\ndescription: x\n---\nbody\n");
+
+    const entries = discoverDiskSkills({ rootMdAndNested: [rootMdAndNested], nestedOnly: [nestedOnly] });
+    expect(entries.map((e) => e.name)).toEqual(["quick"]);
+  });
+
+  test("finds SKILL.md skills nested in both root kinds, including hidden ones", () => {
+    const root = mkdtempSync(join(tmpdir(), "disk-skills-hidden-"));
+    tempDirs.push(root);
+    const dir = join(root, "ak-advise");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SKILL.md"),
+      '---\nname: ak-advise\ndescription: "Interview-driven advisory skill."\nuser-invocable: true\ndisable-model-invocation: true\n---\n\nbody\n',
+    );
+
+    const entries = discoverDiskSkills({ rootMdAndNested: [], nestedOnly: [root] });
+    expect(entries).toEqual([
+      { name: "ak-advise", description: "Interview-driven advisory skill.", filePath: join(dir, "SKILL.md") },
+    ]);
+  });
+
+  test("missing roots yield no entries", () => {
+    expect(discoverDiskSkills({ rootMdAndNested: [join(tmpdir(), "nope-a")], nestedOnly: [join(tmpdir(), "nope-b")] })).toEqual([]);
+  });
+});
+
 describe("skill tool", () => {
   test("registers mandatory invocation guidance", () => {
     const api = makeAPI();
@@ -96,5 +130,44 @@ describe("skill tool", () => {
     expect(first.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("# Debug workflow") });
     expect(repeated.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("already active in this session") });
     expect(otherSession.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("# Debug workflow") });
+  });
+
+  test("falls back to on-disk discovery for a disable-model-invocation skill", async () => {
+    const root = mkdtempSync(join(tmpdir(), "disk-fallback-"));
+    tempDirs.push(root);
+    const dir = join(root, "ak-advise");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SKILL.md"),
+      "---\nname: ak-advise\ndescription: Interview-driven advisory skill.\ndisable-model-invocation: true\n---\n\n# Advise\nInterview the user.\n",
+    );
+
+    const api = makeAPI();
+    skillLoader(api as unknown as ExtensionAPI, {
+      discoverDiskSkills: () => discoverDiskSkills({ rootMdAndNested: [], nestedOnly: [root] }),
+    });
+    const tool = api.tools[0]!;
+
+    // Not in <available_skills> — Pi hides disable-model-invocation skills from it.
+    const result = await tool.execute("1", { name: "ak-advise" }, undefined, undefined, context("", {}));
+    expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("Interview the user.") });
+    expect(result.details).toMatchObject({ skillName: "ak-advise" });
+  });
+
+  test("still reports not-found for a genuinely unknown name, using disk suggestions", async () => {
+    const root = mkdtempSync(join(tmpdir(), "disk-fallback-miss-"));
+    tempDirs.push(root);
+    const dir = join(root, "ak-advise");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), "---\nname: ak-advise\ndescription: x\n---\nbody\n");
+
+    const api = makeAPI();
+    skillLoader(api as unknown as ExtensionAPI, {
+      discoverDiskSkills: () => discoverDiskSkills({ rootMdAndNested: [], nestedOnly: [root] }),
+    });
+    const tool = api.tools[0]!;
+
+    const result = await tool.execute("1", { name: "totally-unknown" }, undefined, undefined, context("", {}));
+    expect(result.details).toMatchObject({ isError: true });
   });
 });

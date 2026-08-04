@@ -2,8 +2,9 @@
 
 A general, extensible pack of enhancements for the [Pi agent harness](https://pi.dev/).
 The package name is intentionally generic so it can host unrelated Pi enhancements
-over time. It includes **auto-skills**, a durable **skill-loader** tool, and a
-**herdr-repair** post-update workflow.
+over time. It includes **auto-skills**, a durable **skill-loader** tool,
+**pinned-model**, and post-update workflows: **herdr-repair** and
+**update-pi-from-ak** (skill name repair + Claude Code agent conversion).
 
 > auto-skills is a **convenience layer that supplements — never replaces — the
 > model's own skill selection**. Pi already lists every skill's name+description
@@ -45,6 +46,50 @@ Safety properties (all covered by `test/repair-herdr-agent.test.ts`):
 - **Reversible** — writes a `pim.ts.herdr-backup` of the original content before
   the first patch; `--restore` rolls it back.
 
+### skill-name-repair
+
+A safe, idempotent post-update repair for skill frontmatter `name:` values that
+Pi rejects. AgentKit (`ak update`) rewrites every `~/.claude/skills/<dir>/SKILL.md`
+with a namespaced `name: ak:<skill>`, but the Agent Skills grammar Pi enforces is
+`[a-z0-9]([a-z0-9-]*[a-z0-9])?` — the colon is invalid, so those skills load with
+`invalid-name` diagnostics and their `/skill:<name>` commands break. This workflow
+rewrites the names to their hyphenated form (`ak:debug` -> `ak-debug`), which
+already matches the directory names AgentKit creates.
+
+Safety properties (all covered by `test/update-pi-from-ak.test.ts`):
+
+- **Scoped** — only the `name:` key inside the leading `---` frontmatter block is
+  touched; `name:`-looking lines in the body are left alone.
+- **Idempotent** — already-valid names are classified `valid` and skipped.
+- **Collision-aware** — reports when a repaired name is declared by several
+  roots (Pi warns and keeps the first), without blocking the repair.
+- **Reversible** — writes `SKILL.md.skill-name-backup` before the first patch;
+  `--restore` rolls it back. A failed post-patch verification auto-rolls back.
+- **One-shot** — `--update` runs `ak update --global --yes` first (global/user
+  kits only; project-level refreshes are never triggered) and repairs right
+  after, so the names never stay broken between the two steps.
+
+### pinned-model
+
+Forces every new session (`/new`) onto a pinned model, ignoring whatever model
+the current session happens to be running.
+
+Pi rewrites `defaultProvider`/`defaultModel` in `settings.json` on every model
+switch (`/model`, model cycling, `setModel`), so those fields behave as "last
+used model" and cannot act as a stable default. `/new` also reuses the running
+process's model. This extension keeps a separate `pinnedModel` block that Pi
+never overwrites and reapplies it on `session_start` with reason `"new"`.
+
+```jsonc
+// ~/.pi/agent/settings.json (global) or .pi/settings.json (per repo, wins)
+{
+  "pinnedModel": { "provider": "tuongnguyen-proxy", "model": "glm-5.2" }
+}
+```
+
+No pin configured means no behavior change. Unavailable model or missing API key
+is reported as a notice and the current model is kept.
+
 ### auto-skills
 
 Automatically selects and loads materially relevant installed skills from the
@@ -74,6 +119,57 @@ user's request, instead of always relying on the model to sift the full catalog.
   and held constant for that turn.
 - **Observability & controls**: footer status, persisted state, and
   `/askills status|reload|enable|disable|test <query>`.
+
+### ak-hooks-bridge
+
+Pi has no `hooks.json`/`PreToolUse`-style hook system — it has typed extension
+events (`pi.on(...)`). AgentKit ships ~20 Claude Code hook scripts
+(`~/.claude/hooks/*.cjs`, registered in `~/.claude/settings.json`'s `hooks`
+block) that its skills/agents assume run alongside them: privacy/scout
+directory blocking, plan-format nudges, session-state tracking, usage-quota
+caching, etc. Rather than reimplementing each script in TypeScript, this
+extension is a generic bridge: it reads the same hook registry AgentKit
+already wrote for Claude Code and, for every Pi event with a faithful Claude
+Code equivalent, spawns the matching `.cjs` hook with a Claude Code-shaped JSON
+payload on stdin and applies its verdict (block / allow / inject context).
+
+| Claude Code hook | Pi event | Behavior |
+|---|---|---|
+| `PreToolUse` | `tool_call` | Blocking — `permissionDecision: "deny"` or exit 2 blocks the tool call. |
+| `PostToolUse` | `tool_result` | Non-blocking — `additionalContext` is appended to the tool result. |
+| `UserPromptSubmit` | `before_agent_start` | A block is surfaced as injected context (Pi can't hard-block a submitted prompt); `additionalContext` is injected as a hidden message. |
+| `SessionStart` | `session_start` | Non-blocking — `additionalContext` shows as a notice. |
+| `PreCompact` | `session_before_compact` | Blocking — a deny cancels the compaction. |
+| `Stop` | `agent_settled` | Fire-and-forget (reminders/telemetry only). |
+
+**Gap:** `SubagentStart`/`SubagentStop` have no Pi equivalent (Pi's subagent
+tool, from `hd-agent`, doesn't emit lifecycle events), so those AgentKit hooks
+(`subagent-init.cjs`, `team-context-inject.cjs`) never run under Pi.
+
+Disabled by default. Enable in `~/.pi/agent/settings.json` (global) or
+`.pi/settings.json` (project; overrides global):
+
+```json
+{
+  "akHooksBridge": {
+    "enabled": true,
+    "hooksSettingsPath": "~/.claude/settings.json",
+    "disabledHooks": ["session-init.cjs", "scout-block.cjs"]
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch. |
+| `hooksSettingsPath` | `~/.claude/settings.json` | Where the `hooks` registry is read from. |
+| `disabledHooks` | `[]` | Script basenames (e.g. `"privacy-block.cjs"`) to never run. |
+
+Each hook script keeps its own internal `isHookEnabled(...)` gate (from
+AgentKit's `ck-config-utils.cjs`), so most can also be toggled through
+AgentKit's own config without touching `disabledHooks` here. Every hook call
+has a 5s timeout and fails open (allows) on timeout, crash, or unparsable
+output — a broken or slow AgentKit hook can never hang or block a Pi session.
 
 ## Install
 
@@ -229,6 +325,93 @@ the upstream shape has changed and needs manual review. It is safe to re-run
 after every update; it no-ops when the launcher already exports `HERDR_AGENT`
 (either from a prior repair or a future upstream fix).
 
+## Update Pi from AgentKit
+
+AgentKit (`ak update`) ships two kinds of Claude-Code-flavored assets that Pi
+doesn't consume as-is:
+
+1. **Skills** — `~/.claude/skills/<dir>/SKILL.md` gets a namespaced
+   `name: ak:<skill>`, but Pi's Agent Skills grammar
+   (`[a-z0-9]([a-z0-9-]*[a-z0-9])?`) rejects the colon, so the skill loads with
+   an `invalid-name` diagnostic and its `/skill:<name>` command breaks.
+2. **Agents** — `~/.claude/agents/*.md` uses Capitalized Claude Code tool names
+   (`Glob, Grep, Bash, …`) and Claude model aliases (`opus`, `sonnet`, `haiku`,
+   `fable`, `inherit`), which Pi's subagent loader (`~/.pi/agent/agents/*.md`)
+   doesn't understand.
+
+`scripts/update-pi-from-ak.ts` repairs both, independently and idempotently.
+Re-run it from any cwd after every `ak update`:
+
+```bash
+bun run ~/.pi/agent/git/github.com/miken90/amp-pi-extensions/scripts/update-pi-from-ak.ts
+
+bun run …/update-pi-from-ak.ts --check          # dry-run both steps, write nothing
+bun run …/update-pi-from-ak.ts --restore        # roll back both steps from their backups
+bun run …/update-pi-from-ak.ts --skip-skills    # agent conversion only
+bun run …/update-pi-from-ak.ts --skip-agents    # skill name repair only
+```
+
+### Skill name repair
+
+```bash
+bun run …/update-pi-from-ak.ts --root ~/.claude/skills   # override scanned roots (repeatable)
+```
+
+Default roots are `~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, and
+`~/.pi/agent/skills`. Rewrites offending names to the hyphenated form
+(`ak:debug` -> `ak-debug`), matching the on-disk directory names AgentKit
+already creates. Only the `name:` key inside the leading frontmatter block is
+touched; `name:`-looking lines in the body are left alone. Backs up each
+changed file as `SKILL.md.skill-name-backup` before writing; a failed
+post-patch verification auto-rolls back. Restart Pi afterwards to reload the
+skill list.
+
+### Agent conversion
+
+```bash
+bun run …/update-pi-from-ak.ts --agents-root ~/.claude/agents   # override the source dir
+bun run …/update-pi-from-ak.ts --agents-out ~/.pi/agent/agents  # override the target dir
+```
+
+Converts each `~/.claude/agents/*.md` into a Pi agent definition at
+`~/.pi/agent/agents/*.md`, keeping `name`/`description`/the markdown body
+verbatim, and:
+
+- **Tools**: maps known Claude Code tools to Pi tool ids (`Glob`→`glob`,
+  `Grep`→`grep`, `Read`→`read`, `Write`→`write`, `Edit`/`MultiEdit`→`edit`,
+  `Bash`→`bash`, `WebFetch`→`web_fetch`, `WebSearch`→`web_search`,
+  `Task(name)`→`subagent`). Tools with no Pi equivalent (`TaskCreate`,
+  `TaskGet`, `TaskUpdate`, `TaskList`, `SendMessage`, `BashOutput`, `KillBash`,
+  `ListMcpResourcesTool`, `ReadMcpResourceTool`, `LS`) are dropped and reported.
+- **Model**: maps known Claude aliases (`opus`, `sonnet`, `haiku`, `fable`) to
+  Pi model ids; drops `inherit` (Pi has no equivalent, so the caller's model
+  applies); unknown aliases pass through unmapped with a warning so you can
+  fix them by hand.
+- **Drops** Claude-only frontmatter Pi doesn't read (`memory:`).
+
+Only writes when the converted content actually changed (idempotent); backs up
+the previous converted file as `*.ak-agent-backup` before overwriting.
+
+### Update and convert in one command
+
+`--update` runs `ak update --global --yes` (global/user kits only — project
+refreshes are deliberately skipped) first, then both repair steps:
+
+```bash
+bun run …/update-pi-from-ak.ts --update
+
+# Override the `ak update` args after a bare `--`:
+bun run …/update-pi-from-ak.ts --update -- --global --target codex --yes
+```
+
+`ak`'s stdio is inherited, so an interactive wizard still works. Exit code 3
+(preview-only) is treated as success; any other non-zero exit aborts before the
+repair and is propagated. Handy shell alias:
+
+```bash
+alias akup='bun run ~/.pi/agent/git/github.com/miken90/amp-pi-extensions/scripts/update-pi-from-ak.ts --update'
+```
+
 ## Develop
 
 ```bash
@@ -236,6 +419,7 @@ bun test                       # unit + integration + load-smoke tests
 bun build extensions/auto-skills/index.ts --no-bundle --outfile /tmp/auto-skills.js
 bun build extensions/skill-loader/index.ts --no-bundle --outfile /tmp/skill-loader.js
 bun build scripts/repair-herdr-agent.ts --no-bundle --outfile /tmp/repair-herdr-agent.js
+bun build scripts/update-pi-from-ak.ts --no-bundle --outfile /tmp/update-pi-from-ak.js
 ```
 
 Tests inject a fake parser + temp agent dir, so they never touch the real Pi
@@ -248,6 +432,12 @@ mutate the real global launcher.
 extensions/
 ├── skill-loader/
 │   └── index.ts  # skill tool, /skill routing
+├── pinned-model/
+│   └── index.ts  # reset /new sessions to the pinned model
+├── ak-hooks-bridge/
+│   ├── index.ts   # Pi event wiring: tool_call, tool_result, before_agent_start, …
+│   ├── config.ts  # hooks.json/settings.json hook-registry parsing + matcher logic
+│   └── runner.ts  # spawns each .cjs hook, interprets its allow/block/context verdict
 └── auto-skills/
     ├── index.ts      # Pi extension entry: events, commands, status
     ├── pipeline.ts   # pure end-to-end route: parse -> score -> authority
@@ -260,7 +450,8 @@ extensions/
     ├── config.ts     # settings + persisted runtime state
     └── types.ts      # shared types & defaults
 scripts/
-└── repair-herdr-agent.ts  # idempotent post-update Herdr launcher repair
+├── repair-herdr-agent.ts   # idempotent post-update Herdr launcher repair
+└── update-pi-from-ak.ts    # idempotent post-`ak update` skill name repair + agent conversion
 ```
 
 See [`docs/auto-skills.md`](docs/auto-skills.md) for design notes.
@@ -275,4 +466,6 @@ so Pi does not scan it and the diagnostics no longer appear for skills loaded
 through this package. Skill discovery is now limited to Pi's two built-in
 global paths (`~/.pi/agent/skills/` and `~/.agents/skills/`). If you add
 `~/.claude/skills/` back via Pi settings (`"skills": ["~/.claude/skills"]`),
-the diagnostics will return unless the `name:` fields are hyphen-only.
+the diagnostics will return unless the `name:` fields are hyphen-only — run
+`scripts/update-pi-from-ak.ts` (see [Update Pi from AgentKit](#update-pi-from-agentkit)) to
+normalize them after every `ak update`.

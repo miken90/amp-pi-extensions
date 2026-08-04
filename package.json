@@ -9,7 +9,8 @@
     "extensions": ["./extensions"]
   },
   "bin": {
-    "amp-pi-repair-herdr": "./scripts/repair-herdr-agent.ts"
+    "amp-pi-repair-herdr": "./scripts/repair-herdr-agent.ts",
+    "amp-pi-update-from-ak": "./scripts/update-pi-from-ak.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -17,6 +18,8 @@
   "scripts": {
     "test": "bun test",
     "repair-herdr": "bun run ./scripts/repair-herdr-agent.ts",
+    "update-from-ak": "bun run ./scripts/update-pi-from-ak.ts",
+    "ak-update": "bun run ./scripts/update-pi-from-ak.ts --update",
     "typecheck": "echo 'tsc not available offline; use bun test + bun build' && exit 0"
   }
 }

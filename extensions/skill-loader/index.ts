@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type SkillEntry = {
@@ -66,6 +67,117 @@ function distance(left: string, right: string): number {
   return row[right.length] ?? left.length;
 }
 
+// `disable-model-invocation: true` skills are deliberately excluded from Pi's
+// model-facing <available_skills> block (they must not be auto-selected), but
+// they are still meant to work via an explicit `/skill:name` command. Because
+// this extension routes lookups through the same prompt-derived entry list
+// (see `execute` below), those skills silently 404 unless we also discover
+// them straight off disk and merge them in. This mirrors, on-disk, exactly
+// the locations Pi's own skill loader scans (see docs/skills.md "Locations").
+
+function frontmatterBlock(content: string): string | null {
+  if (!content.startsWith("---")) return null;
+  const end = content.indexOf("\n---", 3);
+  return end < 0 ? null : content.slice(0, end);
+}
+
+function frontmatterField(front: string, key: string): string | undefined {
+  const match = front.match(new RegExp(`^${key}:[ \t]*(.+)$`, "m"));
+  if (!match) return undefined;
+  let value = (match[1] ?? "").trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value;
+}
+
+function skillEntryFromFile(filePath: string): SkillEntry | undefined {
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const front = frontmatterBlock(content);
+  if (!front) return undefined;
+  const name = frontmatterField(front, "name");
+  if (!name) return undefined;
+  return { name, description: frontmatterField(front, "description") ?? "", filePath };
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Directories containing a `SKILL.md`, found recursively under `root` (bounded depth). */
+function findSkillMdDirs(root: string, depth = 4): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  if (entries.includes("SKILL.md") && !isDirectory(join(root, "SKILL.md"))) found.push(root);
+  if (depth <= 0) return found;
+  for (const entry of entries) {
+    if (entry.startsWith(".") || entry === "node_modules") continue;
+    const path = join(root, entry);
+    if (isDirectory(path)) found.push(...findSkillMdDirs(path, depth - 1));
+  }
+  return found;
+}
+
+export type DiskSkillRoots = {
+  /** Roots where root-level `.md` files are individual skills AND `SKILL.md` subdirs are scanned. */
+  rootMdAndNested: readonly string[];
+  /** Roots where only `SKILL.md` subdirs are scanned (root `.md` files are ignored). */
+  nestedOnly: readonly string[];
+};
+
+/** Default disk roots, mirroring docs/skills.md "Locations" exactly. */
+export function defaultDiskSkillRoots(cwd: string): DiskSkillRoots {
+  return {
+    rootMdAndNested: [join(homedir(), ".pi", "agent", "skills"), join(cwd, ".pi", "skills")],
+    nestedOnly: [join(homedir(), ".agents", "skills"), join(cwd, ".agents", "skills")],
+  };
+}
+
+/**
+ * Scan Pi's global + project-local skill directories directly off disk, so
+ * `disable-model-invocation` skills (invisible in the rendered system prompt)
+ * can still be resolved by exact `/skill:name` invocation.
+ */
+export function discoverDiskSkills(roots: DiskSkillRoots): SkillEntry[] {
+  const entries: SkillEntry[] = [];
+  const seen = new Set<string>();
+  const addFile = (filePath: string) => {
+    if (seen.has(filePath)) return;
+    const entry = skillEntryFromFile(filePath);
+    if (entry) {
+      seen.add(filePath);
+      entries.push(entry);
+    }
+  };
+
+  for (const dir of roots.rootMdAndNested) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      if (entry.endsWith(".md") && !isDirectory(join(dir, entry))) addFile(join(dir, entry));
+    }
+  }
+
+  for (const root of [...roots.rootMdAndNested, ...roots.nestedOnly]) {
+    for (const dir of findSkillMdDirs(root)) addFile(join(dir, "SKILL.md"));
+  }
+
+  return entries;
+}
+
 export function findSkill(query: string, entries: readonly SkillEntry[]): SkillEntry | undefined {
   const normalized = normalize(query);
   if (!normalized) return undefined;
@@ -116,7 +228,13 @@ function loadedSkillsFor(sessionManager: object): Set<string> {
   return loaded;
 }
 
-export default function skillLoader(pi: ExtensionAPI): void {
+export type SkillLoaderDeps = {
+  /** Override disk skill discovery (tests inject a fixed root set). */
+  discoverDiskSkills?: (cwd: string) => SkillEntry[];
+};
+
+export default function skillLoader(pi: ExtensionAPI, deps?: SkillLoaderDeps): void {
+  const discoverDisk = deps?.discoverDiskSkills ?? ((cwd: string) => discoverDiskSkills(defaultDiskSkillRoots(cwd)));
   const clearSessionCache = (_event: unknown, ctx: { sessionManager: object }) => {
     loadedBySession.delete(ctx.sessionManager);
   };
@@ -157,8 +275,15 @@ export default function skillLoader(pi: ExtensionAPI): void {
       if (signal?.aborted) throw new Error("Skill invocation aborted before execution.");
 
       const requestedName = params.name.trim();
-      const entries = parseSkillEntries(ctx.getSystemPrompt());
-      const skill = findSkill(requestedName, entries);
+      const visibleEntries = parseSkillEntries(ctx.getSystemPrompt());
+      let skill = findSkill(requestedName, visibleEntries);
+      // Not in the model-visible list: it may be a `disable-model-invocation`
+      // skill, which Pi deliberately hides from <available_skills> but still
+      // means to support via explicit `/skill:name`. Fall back to an on-disk
+      // scan before giving up.
+      const diskEntries = skill ? [] : discoverDisk(ctx.cwd);
+      if (!skill) skill = findSkill(requestedName, diskEntries);
+      const entries = [...visibleEntries, ...diskEntries];
       if (!skill) {
         const suggestions = suggestionsFor(requestedName, entries);
         return {
