@@ -1,7 +1,7 @@
 {
   "name": "amp-pi",
   "version": "0.1.0",
-  "description": "A general, extensible pack of enhancements for the Pi agent harness. First feature: automatic skill routing (auto-skills).",
+  "description": "A general, extensible pack of enhancements for the Pi agent harness: auto-skills, skill-loader, pinned-model, session-breakdown, prompt-editor, autocompact-lite, memory-lite, and post-update workflows.",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "pi"],
   "license": "MIT",
