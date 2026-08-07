@@ -259,8 +259,7 @@ test("memory-lite source has no timer/watcher/subagent imports", async () => {
 test("/memory command does not collide with existing commands", () => {
 	// Existing commands in this repo: askills
 	// hd-agent commands: usage-hdwebsoft, tps, clear, exit
-	// Plan A commands: session-breakdown, mode
-	const existingCommands = ["askills", "usage-hdwebsoft", "tps", "clear", "exit", "session-breakdown", "mode"];
+	const existingCommands = ["askills", "usage-hdwebsoft", "tps", "clear", "exit"];
 	expect(existingCommands).not.toContain("memory");
 });
 
@@ -271,12 +270,3 @@ test("memory-lite storage path is under memory-lite/ not memories/", () => {
 	expect(identity.storageDir).not.toContain("memories");
 });
 
-// --- Plan A unchanged ---
-
-test("Plan A directory still exists and has all files", () => {
-	const planDir = "plans/260805-1746-adapt-session-breakdown-prompt-editor-autocompact-lite";
-	expect(existsSync(join(planDir, "plan.md"))).toBe(true);
-	expect(existsSync(join(planDir, "phase-01-start.md"))).toBe(true);
-	expect(existsSync(join(planDir, "phase-02-prompt-editor.md"))).toBe(true);
-	expect(existsSync(join(planDir, "phase-03-autocompact-lite.md"))).toBe(true);
-});

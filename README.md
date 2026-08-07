@@ -171,95 +171,6 @@ AgentKit's own config without touching `disabledHooks` here. Every hook call
 has a 5s timeout and fails open (allows) on timeout, crash, or unparsable
 output — a broken or slow AgentKit hook can never hang or block a Pi session.
 
-### session-breakdown
-
-Interactive TUI that analyzes `~/.pi/agent/sessions/**/*.jsonl` and shows the
-last 7/30/90 days of session usage: sessions/day, messages/day, tokens/day,
-cost/day, with model/cwd/day-of-week/time-of-day breakdown views.
-
-- **Read-only**: zero filesystem writes — only `readdir`/`stat`/stream-read.
-- **GitHub-contributions-style calendar heatmap** with model-weighted colors.
-- **View toggles**: model / cwd / day-of-week / time-of-day.
-- **Metric toggles**: sessions / messages / tokens.
-- **Range switching**: 7/30/90-day windows via in-TUI keybindings.
-
-Adapted from `darkamenosa/pi-setup` (Apache-2.0). See the Third-party
-attribution section below.
-
-### prompt-editor
-
-Interactive mode/model/thinking-level editor with named "modes" — each a
-(provider, modelId, thinkingLevel, editor-border color) tuple — stored in
-`modes.json` (global: `~/.pi/agent/modes.json`; project: `.pi/modes.json`,
-project overriding global).
-
-- `/mode` command: select, create, rename, delete, and switch modes.
-- `ctrl+shift+m` shortcut: open the mode selector.
-- `ctrl+space` shortcut: cycle to the next mode.
-- **No interference with `pinned-model`**: never writes to `pinnedModel`,
-  `defaultProvider`, or `defaultModel` settings keys.
-- Cross-process file-locking with stale-lock recovery for `modes.json`.
-- Prompt history from previous sessions in the same cwd.
-
-Adapted from `darkamenosa/pi-setup` (Apache-2.0). See the Third-party
-attribution section below.
-
-### autocompact-lite
-
-A minimal, Pi-0.83-native proactive context-overflow recovery extension.
-Detects approaching context overflow between turns using a configurable
-percentage-plus-reserve threshold and triggers Pi's built-in `compact()`
-before the next model request.
-
-- **Dual threshold**: compaction fires when context tokens exceed
-  `min(contextWindow * thresholdPercent / 100, contextWindow - reserveTokens)`.
-  The percentage threshold gives consistent behavior across model window sizes;
-  the reserve safety net ensures room for the model's response.
-- **Dynamic contextWindow**: reads the active model's `contextWindow` through
-  `ctx.getContextUsage()` — no hardcoded model names or window sizes.
-- **Cooldown**: after a proactive compaction, subsequent triggers are suppressed
-  for `cooldownTurns` turns unless token usage is observed to drop below the
-  threshold (re-arming). This prevents repeated compaction of a conversation
-  that stays near the boundary.
-- **No double-triggering**: in-memory per-turn guard prevents redundant
-  compaction within the same turn.
-- **Fail-open**: compaction failure is reported via `ctx.ui.notify` and never
-  crashes the turn.
-- **Unclamped percentage**: raw context percentage may exceed 100% (real
-  overload) and is never masked — only the trigger calculation uses it.
-- **No Codex/Grok/OAuth, no subagent capability channel, no goal-extension
-  coupling** — deliberately minimal.
-
-#### Settings
-
-Configured through the `autoCompactLite` block in `settings.json` (global
-`~/.pi/agent/settings.json` or project `.pi/settings.json`, project overriding
-global). Invalid values silently fall back to defaults.
-
-```json
-{
-  "autoCompactLite": {
-    "enabled": true,
-    "thresholdPercent": 85,
-    "reserveTokens": 32768,
-    "cooldownTurns": 2
-  }
-}
-```
-
-| Field | Default | Range | Meaning |
-|---|---|---|---|
-| `enabled` | `true` | boolean | Master switch. |
-| `thresholdPercent` | `85` | 1–100 | Compact when usage exceeds this % of `contextWindow`. |
-| `reserveTokens` | `32768` | 1024–1000000 | Safety reserve: also compact when `tokens > contextWindow - reserveTokens`. |
-| `cooldownTurns` | `2` | 0–100 | Minimum turns between proactive triggers (unless re-armed by observed reduction). |
-
-After changing settings, run `/reload` in the Pi session to pick up the new
-configuration.
-
-Inspired by `darkamenosa/pi-setup`'s autocompact.ts (Apache-2.0); no source
-lines copied — reimplemented against Pi 0.83's public compaction API.
-
 ### memory-lite
 
 A default-off, manual-only, per-repository Markdown memory extension with
@@ -555,18 +466,6 @@ extensions/
 │   ├── prompt.ts     # builds the injected <auto-skills> block
 │   ├── config.ts     # settings + persisted runtime state
 │   └── types.ts      # shared types & defaults
-├── session-breakdown/
-│   ├── index.ts      # /session-breakdown command + TUI wiring
-│   ├── discovery.ts  # JSONL scan/parse, session metadata extraction
-│   ├── breakdown.ts  # aggregation math, palettes, computeBreakdown
-│   └── render.ts     # BreakdownComponent (calendar heatmap + tables)
-├── prompt-editor/
-│   ├── index.ts       # /mode command, shortcuts, session_start/model_select handlers
-│   ├── modes-store.ts # file I/O + locking + schema, pure CRUD helpers
-│   └── modes.ts       # inferModeFromSelection, cycleModeName (pure)
-├── autocompact-lite/
-│   ├── index.ts  # turn_end handler: proactive compaction trigger
-│   └── usage.ts  # shouldCompact logic, settings resolution (pure, testable)
 └── memory-lite/
     ├── index.ts       # /memory command, context handler registration
     ├── identity.ts    # Git boundary discovery, remote normalization, key derivation
@@ -592,13 +491,7 @@ See [`docs/auto-skills.md`](docs/auto-skills.md) for design notes.
 This repository includes code adapted from
 [`darkamenosa/pi-setup`](https://github.com/darkamenosa/pi-setup) (Apache
 License 2.0). The adapted files retain their Apache-2.0-derived status and
-are not relicensed under this repository's MIT license:
-
-| Extension | Source file | Changes |
-|---|---|---|
-| `session-breakdown` | `extensions/session-breakdown.ts` | Split into multi-module directory (`discovery.ts`, `breakdown.ts`, `render.ts`, `index.ts`); import paths adjusted. |
-| `prompt-editor` | `extensions/prompt-editor.ts` | Split into `modes-store.ts`, `modes.ts`, `index.ts`; uses real `getAgentDir()` from SDK instead of best-effort duplicate. |
-| `autocompact-lite` | `extensions/autocompact.ts` | Reimplementation only — no source lines copied. Built against Pi 0.83's public compaction API. |
+are not relicensed under this repository's MIT license.
 
 Apache-2.0 §4 attribution obligations are satisfied by: (a) retaining the
 license header in each adapted file, (b) stating that files were changed,
