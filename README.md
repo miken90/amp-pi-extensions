@@ -51,7 +51,7 @@ Safety properties (all covered by `test/repair-herdr-agent.test.ts`):
 A safe, idempotent post-update repair for skill frontmatter `name:` values that
 Pi rejects. AgentKit (`ak update`) rewrites every `~/.claude/skills/<dir>/SKILL.md`
 with a namespaced `name: ak:<skill>`, but the Agent Skills grammar Pi enforces is
-`[a-z0-9]([a-z0-9-]*[a-z0-9])?` — the colon is invalid, so those skills load with
+`[a-z0-9]`, optionally followed by `[a-z0-9-]*[a-z0-9]` — the colon is invalid, so those skills load with
 `invalid-name` diagnostics and their `/skill:<name>` commands break. This workflow
 rewrites the names to their hyphenated form (`ak:debug` -> `ak-debug`), which
 already matches the directory names AgentKit creates.
@@ -348,8 +348,8 @@ AgentKit (`ak update`) ships two kinds of Claude-Code-flavored assets that Pi
 doesn't consume as-is:
 
 1. **Skills** — `~/.claude/skills/<dir>/SKILL.md` gets a namespaced
-   `name: ak:<skill>`, but Pi's Agent Skills grammar
-   (`[a-z0-9]([a-z0-9-]*[a-z0-9])?`) rejects the colon, so the skill loads with
+   `name: ak:<skill>`, but Pi's Agent Skills grammar (`[a-z0-9]`, optionally
+   followed by `[a-z0-9-]*[a-z0-9]`) rejects the colon, so the skill loads with
    an `invalid-name` diagnostic and its `/skill:<name>` command breaks.
 2. **Agents** — `~/.claude/agents/*.md` uses Capitalized Claude Code tool names
    (`Glob, Grep, Bash, …`) and Claude model aliases (`opus`, `sonnet`, `haiku`,
